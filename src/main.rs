@@ -7,6 +7,28 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+const HELP_TEXT: &str = r#"discord-log (log) - Send command execution outputs to a Discord Webhook.
+
+Usage:
+  log <command> [args...]
+  log [options] <command> [args...]
+
+Options:
+  --init <URL>       Save Discord Webhook URL (one-time setup)
+  -e, --stderr       Send ONLY stderr output
+  -o, --stdout       Send ONLY stdout output
+  -g, --grep <word>  Filter output lines matching keyword (case-insensitive)
+  -f, --file <path>  Upload an existing log file
+  -w, --webhook <URL> Override Discord Webhook URL
+  -h, --help         Show this help message
+  -V, --version      Show version
+
+Examples:
+  log colcon build
+  log make -j4
+  log -e -g error colcon build
+"#;
+
 struct Config {
     webhook: Option<String>,
     file: Option<PathBuf>,
@@ -14,6 +36,8 @@ struct Config {
     stdout: bool,
     grep: Option<String>,
     command: Vec<String>,
+    show_help: bool,
+    show_version: bool,
 }
 
 fn parse_custom_args() -> Config {
@@ -24,11 +48,19 @@ fn parse_custom_args() -> Config {
     let mut stdout = false;
     let mut grep = None;
     let mut command = Vec::new();
+    let mut show_help = false;
+    let mut show_version = false;
 
     let mut idx = 0;
     while idx < raw.len() {
         let arg = &raw[idx];
-        if arg == "-e" || arg == "--stderr" {
+        if arg == "-h" || arg == "--help" {
+            show_help = true;
+            idx += 1;
+        } else if arg == "-V" || arg == "--version" {
+            show_version = true;
+            idx += 1;
+        } else if arg == "-e" || arg == "--stderr" {
             stderr = true;
             idx += 1;
         } else if arg == "-o" || arg == "--stdout" {
@@ -56,7 +88,6 @@ fn parse_custom_args() -> Config {
                 idx += 1;
             }
         } else {
-            // Reached the command part!
             command = raw[idx..].to_vec();
             break;
         }
@@ -69,6 +100,8 @@ fn parse_custom_args() -> Config {
         stdout,
         grep,
         command,
+        show_help,
+        show_version,
     }
 }
 
@@ -128,6 +161,17 @@ async fn main() -> Result<()> {
     }
 
     let args = parse_custom_args();
+
+    if args.show_help {
+        print!("{}", HELP_TEXT);
+        return Ok(());
+    }
+
+    if args.show_version {
+        println!("discord-log {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let webhook_url = resolve_webhook_url(args.webhook)?;
 
     let (buffer, filename, title) = if !args.command.is_empty() {
@@ -247,7 +291,8 @@ async fn main() -> Result<()> {
         let title_text = "Piped Stream Log".to_string();
         (buffer, fname, title_text)
     } else {
-        bail!("Usage:\n  log --init <WEBHOOK_URL>\n  log <command>");
+        print!("{}", HELP_TEXT);
+        return Ok(());
     };
 
     if buffer.is_empty() {
