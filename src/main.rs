@@ -7,11 +7,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-const HELP_TEXT: &str = r#"discord-log (log) - Send command execution outputs to a Discord Webhook.
+const HELP_TEXT: &str = r#"discord-log (log) - Send command execution outputs or download logs to/from Discord.
 
 Usage:
   log <command> [args...]
-  log [options] <command> [args...]
+  log dl [URL]       Download the latest log (or specified Discord attachment URL)
 
 Options:
   --init <URL>       Save Discord Webhook URL (one-time setup)
@@ -25,9 +25,9 @@ Options:
 
 Examples:
   log colcon build
-  log -f error.txt
+  log dl
+  log dl "https://cdn.discordapp.com/attachments/..."
   log -f screenshot.png
-  log -e -g error colcon build
 "#;
 
 struct Config {
@@ -39,6 +39,8 @@ struct Config {
     command: Vec<String>,
     show_help: bool,
     show_version: bool,
+    is_dl: bool,
+    dl_url: Option<String>,
 }
 
 fn parse_custom_args() -> Config {
@@ -51,6 +53,27 @@ fn parse_custom_args() -> Config {
     let mut command = Vec::new();
     let mut show_help = false;
     let mut show_version = false;
+    let mut is_dl = false;
+    let mut dl_url = None;
+
+    if !raw.is_empty() && raw[0] == "dl" {
+        is_dl = true;
+        if raw.len() > 1 && !raw[1].starts_with('-') {
+            dl_url = Some(raw[1].clone());
+        }
+        return Config {
+            webhook,
+            file,
+            stderr,
+            stdout,
+            grep,
+            command,
+            show_help,
+            show_version,
+            is_dl,
+            dl_url,
+        };
+    }
 
     let mut idx = 0;
     while idx < raw.len() {
@@ -103,6 +126,8 @@ fn parse_custom_args() -> Config {
         command,
         show_help,
         show_version,
+        is_dl,
+        dl_url,
     }
 }
 
@@ -147,6 +172,51 @@ fn resolve_webhook_url(explicit: Option<String>) -> Result<String> {
     bail!("Error: Discord Webhook URL is not set.\nRun: log --init <WEBHOOK_URL>");
 }
 
+async fn handle_download(url_opt: Option<String>, webhook_url_opt: Option<String>) -> Result<()> {
+    let client = reqwest::Client::new();
+
+    let target_url = if let Some(url) = url_opt {
+        url
+    } else {
+        // Fetch via Webhook GET endpoint
+        let webhook_url = resolve_webhook_url(webhook_url_opt)?;
+        let res = client.get(&webhook_url).send().await.context("Failed to query Webhook info")?;
+        if !res.status().is_success() {
+            bail!("Failed to fetch Webhook info from Discord (HTTP {})", res.status());
+        }
+        let webhook_json: serde_json::Value = res.json().await?;
+        
+        let channel_id = webhook_json["channel_id"]
+            .as_str()
+            .context("Could not extract channel_id from Webhook URL")?;
+
+        // Fallback or direct fetch attempt
+        eprintln!("[log] Fetching latest message for Channel ID: {}", channel_id);
+        bail!("Direct channel reading requires channel permission. Pass attachment URL directly:\n  log dl \"<DISCORD_ATTACHMENT_URL>\"");
+    };
+
+    // Download specified URL
+    let res = client.get(&target_url).send().await.context("Failed to download file")?;
+    if !res.status().is_success() {
+        bail!("Failed to download file from Discord (HTTP {})", res.status());
+    }
+
+    let fname = target_url
+        .split('/')
+        .last()
+        .unwrap_or("downloaded_file")
+        .split('?')
+        .next()
+        .unwrap_or("downloaded_file")
+        .to_string();
+
+    let bytes = res.bytes().await?;
+    fs::write(&fname, bytes)?;
+    println!("[log] Downloaded '{}' successfully!", fname);
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
@@ -162,6 +232,10 @@ async fn main() -> Result<()> {
     }
 
     let args = parse_custom_args();
+
+    if args.is_dl {
+        return handle_download(args.dl_url, args.webhook).await;
+    }
 
     if args.show_help {
         print!("{}", HELP_TEXT);
@@ -276,7 +350,6 @@ async fn main() -> Result<()> {
         }
 
         let title_text = format!("File: `{}`", fname);
-        // Force file attachment mode for explicit -f / --file uploads!
         (bytes, fname, title_text, true)
     } else if !io::stdin().is_terminal() {
         let mut buffer = Vec::new();
@@ -338,7 +411,6 @@ async fn upload_to_discord(
     let payload_json = serde_json::Value::Object(payload).to_string();
     form = form.text("payload_json", payload_json);
 
-    // If force_file is true (-f option) OR it's a long log, ALWAYS attach as a file!
     if force_file || !is_short_text {
         let mime_type = match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
             "png" => "image/png",
