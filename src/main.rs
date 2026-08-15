@@ -151,10 +151,14 @@ fn get_cache_dir() -> PathBuf {
     dir
 }
 
-fn save_to_history(filename: &str, content: &[u8]) {
+fn save_to_history(filename: &str, content: &[u8], comment: Option<&str>) {
     let dir = get_cache_dir();
     let file_path = dir.join(filename);
     let _ = fs::write(&file_path, content);
+    if let Some(c) = comment {
+        let meta_path = dir.join(format!("{}.meta", filename));
+        let _ = fs::write(&meta_path, c);
+    }
 }
 
 fn get_history_files() -> Vec<PathBuf> {
@@ -164,6 +168,11 @@ fn get_history_files() -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext == "meta" {
+                        continue;
+                    }
+                }
                 files.push(path);
             }
         }
@@ -301,10 +310,11 @@ async fn handle_download(dl_arg: Option<String>, webhook_url_opt: Option<String>
                         let msgs: Vec<serde_json::Value> = resp.json().await?;
                         let mut attachments = Vec::new();
                         for m in msgs {
+                            let content_text = m["content"].as_str().unwrap_or("").to_string();
                             if let Some(atts) = m["attachments"].as_array() {
                                 for a in atts {
                                     if let (Some(url), Some(filename)) = (a["url"].as_str(), a["filename"].as_str()) {
-                                        attachments.push((filename.to_string(), url.to_string()));
+                                        attachments.push((filename.to_string(), url.to_string(), content_text.clone()));
                                     }
                                 }
                             }
@@ -321,10 +331,17 @@ async fn handle_download(dl_arg: Option<String>, webhook_url_opt: Option<String>
                                 bail!("Index out of range. Found {} recent attachments on Discord channel.", attachments.len());
                             }
 
-                            let (fname, target_url) = &attachments[idx];
+                            let (fname, target_url, content_text) = &attachments[idx];
                             let dl_bytes = client.get(target_url).send().await?.bytes().await?;
                             fs::write(fname, dl_bytes)?;
                             println!("[log] Downloaded '{}' from Discord Channel (step {})", fname, idx);
+
+                            if let Some(first_line) = content_text.lines().next() {
+                                let first_line = first_line.trim();
+                                if !first_line.is_empty() && !first_line.starts_with("[SUCCESS]") && !first_line.starts_with("[FAILED]") && !first_line.starts_with("[INTERRUPTED]") && !first_line.starts_with("File:") {
+                                    println!("[comment] {}", first_line);
+                                }
+                            }
                             return Ok(());
                         }
                     }
@@ -348,6 +365,14 @@ async fn handle_download(dl_arg: Option<String>, webhook_url_opt: Option<String>
             let content = fs::read(target_path)?;
             fs::write(fname, content)?;
             println!("[log] Downloaded '{}' from history (step {})", fname, idx);
+
+            let meta_path = get_cache_dir().join(format!("{}.meta", fname));
+            if let Ok(comment) = fs::read_to_string(meta_path) {
+                let trimmed = comment.trim();
+                if !trimmed.is_empty() {
+                    println!("[comment] {}", trimmed);
+                }
+            }
             return Ok(());
         }
     }
@@ -551,7 +576,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    save_to_history(&filename, &buffer);
+    save_to_history(&filename, &buffer, args.comment.as_deref());
 
     upload_to_discord(&webhook_url, buffer, &filename, &title, args.comment.as_deref(), force_file).await?;
 
