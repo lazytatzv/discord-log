@@ -18,7 +18,7 @@ Options:
   -e, --stderr       Send ONLY stderr output
   -o, --stdout       Send ONLY stdout output
   -g, --grep <word>  Filter output lines matching keyword (case-insensitive)
-  -f, --file <path>  Upload any file (.txt, .json, .png, .pdf, .log, etc.)
+  -f, --file <path>  Upload file directly as attachment
   -w, --webhook <URL> Override Discord Webhook URL
   -h, --help         Show this help message
   -V, --version      Show version
@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
 
     let webhook_url = resolve_webhook_url(args.webhook)?;
 
-    let (buffer, filename, title, is_binary_file) = if !args.command.is_empty() {
+    let (buffer, filename, title, force_file) = if !args.command.is_empty() {
         let interrupted = Arc::new(AtomicBool::new(false));
         let interrupted_clone = interrupted.clone();
 
@@ -265,18 +265,19 @@ async fn main() -> Result<()> {
     } else if let Some(ref file_path) = args.file {
         let mut bytes = fs::read(file_path).with_context(|| format!("Failed to read '{:?}'", file_path))?;
         let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
-        
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        let is_image_or_binary = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "zip" | "tar" | "gz");
 
-        if !is_image_or_binary {
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let is_binary_file = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "zip" | "tar" | "gz");
+
+        if !is_binary_file {
             if let Some(ref pattern) = args.grep {
                 bytes = filter_by_grep(&bytes, pattern);
             }
         }
 
         let title_text = format!("File: `{}`", fname);
-        (bytes, fname, title_text, is_image_or_binary)
+        // Force file attachment mode for explicit -f / --file uploads!
+        (bytes, fname, title_text, true)
     } else if !io::stdin().is_terminal() {
         let mut buffer = Vec::new();
         let mut stdin = io::stdin();
@@ -307,7 +308,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    upload_to_discord(&webhook_url, buffer, &filename, &title, is_binary_file).await?;
+    upload_to_discord(&webhook_url, buffer, &filename, &title, force_file).await?;
 
     Ok(())
 }
@@ -317,15 +318,15 @@ async fn upload_to_discord(
     content: Vec<u8>,
     filename: &str,
     title: &str,
-    is_binary: bool,
+    force_file: bool,
 ) -> Result<()> {
     let client = reqwest::Client::new();
     let mut form = multipart::Form::new();
 
-    let is_short = !is_binary && content.len() <= 1500;
+    let is_short_text = !force_file && content.len() <= 1500;
     let log_str = String::from_utf8_lossy(&content);
 
-    let payload_content = if is_short {
+    let payload_content = if is_short_text {
         format!("{}\n```\n{}\n```", title, log_str.trim())
     } else {
         title.to_string()
@@ -337,7 +338,8 @@ async fn upload_to_discord(
     let payload_json = serde_json::Value::Object(payload).to_string();
     form = form.text("payload_json", payload_json);
 
-    if !is_short {
+    // If force_file is true (-f option) OR it's a long log, ALWAYS attach as a file!
+    if force_file || !is_short_text {
         let mime_type = match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -345,7 +347,7 @@ async fn upload_to_discord(
             "webp" => "image/webp",
             "pdf" => "application/pdf",
             "json" => "application/json",
-            "txt" => "text/plain; charset=utf-8",
+            "txt" | "log" => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         };
 
