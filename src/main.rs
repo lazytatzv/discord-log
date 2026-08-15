@@ -573,7 +573,7 @@ async fn upload_to_discord(
     let log_str = String::from_utf8_lossy(&content);
 
     let comment_prefix = if let Some(c) = comment {
-        format!("💬 **{}**\n", c)
+        format!("{}\n", c)
     } else {
         "".to_string()
     };
