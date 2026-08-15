@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use clap::Parser;
 use reqwest::multipart;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -8,32 +7,69 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-#[derive(Parser, Debug)]
-#[command(author, version, about = "Send command outputs to Discord Webhook")]
-struct Args {
-    /// Discord Webhook URL (env: DISCORD_WEBHOOK_URL)
-    #[arg(short, long, env = "DISCORD_WEBHOOK_URL")]
+struct Config {
     webhook: Option<String>,
-
-    /// Log file to upload
-    #[arg(short, long)]
     file: Option<PathBuf>,
-
-    /// Send ONLY stderr
-    #[arg(short = 'e', long = "stderr")]
     stderr: bool,
-
-    /// Send ONLY stdout
-    #[arg(short = 'o', long = "stdout")]
     stdout: bool,
-
-    /// Filter output lines matching keyword (case-insensitive)
-    #[arg(short = 'g', long = "grep")]
     grep: Option<String>,
-
-    /// Command to execute (e.g. log colcon build)
-    #[arg(trailing_var_arg = true)]
     command: Vec<String>,
+}
+
+fn parse_custom_args() -> Config {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut webhook = None;
+    let mut file = None;
+    let mut stderr = false;
+    let mut stdout = false;
+    let mut grep = None;
+    let mut command = Vec::new();
+
+    let mut idx = 0;
+    while idx < raw.len() {
+        let arg = &raw[idx];
+        if arg == "-e" || arg == "--stderr" {
+            stderr = true;
+            idx += 1;
+        } else if arg == "-o" || arg == "--stdout" {
+            stdout = true;
+            idx += 1;
+        } else if arg == "-w" || arg == "--webhook" {
+            if idx + 1 < raw.len() {
+                webhook = Some(raw[idx + 1].clone());
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+        } else if arg == "-f" || arg == "--file" {
+            if idx + 1 < raw.len() {
+                file = Some(PathBuf::from(&raw[idx + 1]));
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+        } else if arg == "-g" || arg == "--grep" {
+            if idx + 1 < raw.len() {
+                grep = Some(raw[idx + 1].clone());
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+        } else {
+            // Reached the command part!
+            command = raw[idx..].to_vec();
+            break;
+        }
+    }
+
+    Config {
+        webhook,
+        file,
+        stderr,
+        stdout,
+        grep,
+        command,
+    }
 }
 
 fn filter_by_grep(input: &[u8], pattern: &str) -> Vec<u8> {
@@ -91,7 +127,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let args = Args::parse();
+    let args = parse_custom_args();
     let webhook_url = resolve_webhook_url(args.webhook)?;
 
     let (buffer, filename, title) = if !args.command.is_empty() {
