@@ -11,10 +11,11 @@ const HELP_TEXT: &str = r#"discord-log (log) - Send command execution outputs or
 
 Usage:
   log <command> [args...]
-  log dl [URL]       Download specified URL or automatically fetch from clipboard
+  log dl [N | URL]   Download latest log (log dl), N-th previous log (log dl 1, log dl 2), or URL
 
 Options:
   --init <URL>       Save Discord Webhook URL (one-time setup)
+  --init-token <T>   Save Discord Bot Token (enables fetching history from Discord Channel)
   -e, --stderr       Send ONLY stderr output
   -o, --stdout       Send ONLY stdout output
   -g, --grep <word>  Filter output lines matching keyword (case-insensitive)
@@ -25,8 +26,9 @@ Options:
 
 Examples:
   log colcon build
-  log dl             # Auto-detects URL from clipboard & downloads instantly!
-  log dl "https://cdn.discordapp.com/attachments/..."
+  log dl             # Downloads the latest log
+  log dl 1           # Downloads the 2nd latest log (1 step back)
+  log dl 2           # Downloads the 3rd latest log (2 steps back)
 "#;
 
 struct Config {
@@ -39,7 +41,7 @@ struct Config {
     show_help: bool,
     show_version: bool,
     is_dl: bool,
-    dl_url: Option<String>,
+    dl_arg: Option<String>,
 }
 
 fn parse_custom_args() -> Config {
@@ -53,12 +55,12 @@ fn parse_custom_args() -> Config {
     let mut show_help = false;
     let mut show_version = false;
     let mut is_dl = false;
-    let mut dl_url = None;
+    let mut dl_arg = None;
 
     if !raw.is_empty() && raw[0] == "dl" {
         is_dl = true;
         if raw.len() > 1 && !raw[1].starts_with('-') {
-            dl_url = Some(raw[1].clone());
+            dl_arg = Some(raw[1].clone());
         }
         return Config {
             webhook,
@@ -70,7 +72,7 @@ fn parse_custom_args() -> Config {
             show_help,
             show_version,
             is_dl,
-            dl_url,
+            dl_arg,
         };
     }
 
@@ -126,26 +128,55 @@ fn parse_custom_args() -> Config {
         show_help,
         show_version,
         is_dl,
-        dl_url,
+        dl_arg,
     }
 }
 
+fn get_cache_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let dir = PathBuf::from(format!("{}/.cache/discord-log/history", home));
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+fn save_to_history(filename: &str, content: &[u8]) {
+    let dir = get_cache_dir();
+    let file_path = dir.join(filename);
+    let _ = fs::write(&file_path, content);
+}
+
+fn get_history_files() -> Vec<PathBuf> {
+    let dir = get_cache_dir();
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort_by(|a, b| {
+        let ma = fs::metadata(a).and_then(|m| m.modified()).ok();
+        let mb = fs::metadata(b).and_then(|m| m.modified()).ok();
+        mb.cmp(&ma)
+    });
+    files
+}
+
 fn get_clipboard_url() -> Option<String> {
-    // Try wl-paste (Wayland)
     if let Ok(out) = Command::new("wl-paste").output() {
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if text.starts_with("http://") || text.starts_with("https://") {
             return Some(text);
         }
     }
-    // Try xclip (X11)
     if let Ok(out) = Command::new("xclip").args(["-selection", "clipboard", "-o"]).output() {
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if text.starts_with("http://") || text.starts_with("https://") {
             return Some(text);
         }
     }
-    // Try xsel (X11)
     if let Ok(out) = Command::new("xsel").args(["--clipboard", "--output"]).output() {
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if text.starts_with("http://") || text.starts_with("https://") {
@@ -196,37 +227,141 @@ fn resolve_webhook_url(explicit: Option<String>) -> Result<String> {
     bail!("Error: Discord Webhook URL is not set.\nRun: log --init <WEBHOOK_URL>");
 }
 
-async fn handle_download(url_opt: Option<String>) -> Result<()> {
+fn get_bot_token() -> Option<String> {
+    if let Ok(t) = std::env::var("DISCORD_BOT_TOKEN") {
+        if !t.trim().is_empty() {
+            return Some(t.trim().to_string());
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = format!("{}/.config/discord-log/token", home);
+    if let Ok(content) = fs::read_to_string(path) {
+        let trimmed = content.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+async fn handle_download(dl_arg: Option<String>, webhook_url_opt: Option<String>) -> Result<()> {
     let client = reqwest::Client::new();
 
-    let target_url = if let Some(url) = url_opt {
-        url
-    } else if let Some(clip_url) = get_clipboard_url() {
-        println!("[log] Detected URL from clipboard: {}", clip_url);
-        clip_url
-    } else {
-        bail!("No URL provided and clipboard does not contain a valid URL.\nUsage:\n  1) Copy link on Discord -> run: log dl\n  2) Pass URL directly: log dl <URL>");
-    };
-
-    let res = client.get(&target_url).send().await.context("Failed to download file")?;
-    if !res.status().is_success() {
-        bail!("Failed to download file from Discord (HTTP {})", res.status());
+    // Mode A: Direct URL argument
+    if let Some(ref arg) = dl_arg {
+        if arg.starts_with("http://") || arg.starts_with("https://") {
+            let res = client.get(arg).send().await.context("Failed to download file from URL")?;
+            if !res.status().is_success() {
+                bail!("Failed to download file from Discord (HTTP {})", res.status());
+            }
+            let fname = arg
+                .split('/')
+                .last()
+                .unwrap_or("downloaded_file")
+                .split('?')
+                .next()
+                .unwrap_or("downloaded_file")
+                .to_string();
+            let bytes = res.bytes().await?;
+            fs::write(&fname, bytes)?;
+            println!("[log] Downloaded '{}' successfully!", fname);
+            return Ok(());
+        }
     }
 
-    let fname = target_url
-        .split('/')
-        .last()
-        .unwrap_or("downloaded_file")
-        .split('?')
-        .next()
-        .unwrap_or("downloaded_file")
-        .to_string();
+    // Mode B: Discord API channel history (if --init-token is set)
+    if let Some(bot_token) = get_bot_token() {
+        let webhook_url = resolve_webhook_url(webhook_url_opt)?;
+        let res = client.get(&webhook_url).send().await.context("Failed to fetch Webhook info")?;
+        if res.status().is_success() {
+            let webhook_json: serde_json::Value = res.json().await?;
+            if let Some(channel_id) = webhook_json["channel_id"].as_str() {
+                let limit = 50;
+                let messages_url = format!("https://discord.com/api/v10/channels/{}/messages?limit={}", channel_id, limit);
+                let msg_res = client
+                    .get(&messages_url)
+                    .header("Authorization", format!("Bot {}", bot_token))
+                    .send()
+                    .await;
 
-    let bytes = res.bytes().await?;
-    fs::write(&fname, bytes)?;
-    println!("[log] Downloaded '{}' successfully!", fname);
+                if let Ok(resp) = msg_res {
+                    if resp.status().is_success() {
+                        let msgs: Vec<serde_json::Value> = resp.json().await?;
+                        let mut attachments = Vec::new();
+                        for m in msgs {
+                            if let Some(atts) = m["attachments"].as_array() {
+                                for a in atts {
+                                    if let (Some(url), Some(filename)) = (a["url"].as_str(), a["filename"].as_str()) {
+                                        attachments.push((filename.to_string(), url.to_string()));
+                                    }
+                                }
+                            }
+                        }
 
-    Ok(())
+                        if !attachments.is_empty() {
+                            let idx = if let Some(ref arg) = dl_arg {
+                                arg.parse::<usize>().unwrap_or(0)
+                            } else {
+                                0
+                            };
+
+                            if idx >= attachments.len() {
+                                bail!("Index out of range. Found {} recent attachments on Discord channel.", attachments.len());
+                            }
+
+                            let (fname, target_url) = &attachments[idx];
+                            let dl_bytes = client.get(target_url).send().await?.bytes().await?;
+                            fs::write(fname, dl_bytes)?;
+                            println!("[log] Downloaded '{}' from Discord Channel (step {})", fname, idx);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Mode C: Fallback to local execution history (Zero-config fallback)
+    let history = get_history_files();
+    if !history.is_empty() {
+        let idx = if let Some(ref arg) = dl_arg {
+            arg.parse::<usize>().unwrap_or(0)
+        } else {
+            0
+        };
+
+        if idx < history.len() {
+            let target_path = &history[idx];
+            let fname = target_path.file_name().and_then(|n| n.to_str()).unwrap_or("log.log");
+            let content = fs::read(target_path)?;
+            fs::write(fname, content)?;
+            println!("[log] Downloaded '{}' from history (step {})", fname, idx);
+            return Ok(());
+        }
+    }
+
+    // Mode D: Clipboard fallback
+    if let Some(clip_url) = get_clipboard_url() {
+        println!("[log] Detected URL from clipboard: {}", clip_url);
+        let res = client.get(&clip_url).send().await.context("Failed to download file")?;
+        if !res.status().is_success() {
+            bail!("Failed to download file (HTTP {})", res.status());
+        }
+        let fname = clip_url
+            .split('/')
+            .last()
+            .unwrap_or("downloaded_file")
+            .split('?')
+            .next()
+            .unwrap_or("downloaded_file")
+            .to_string();
+        let bytes = res.bytes().await?;
+        fs::write(&fname, bytes)?;
+        println!("[log] Downloaded '{}' successfully!", fname);
+        return Ok(());
+    }
+
+    bail!("Could not download log.\nSetup options:\n  1) Set Bot Token for Discord API: log --init-token <BOT_TOKEN>\n  2) Copy Discord attachment link -> log dl\n  3) Pass URL directly: log dl <URL>");
 }
 
 #[tokio::main]
@@ -243,10 +378,21 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if raw_args.len() >= 3 && raw_args[1] == "--init-token" {
+        let token = &raw_args[2];
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let config_dir = format!("{}/.config/discord-log", home);
+        fs::create_dir_all(&config_dir)?;
+        let config_file = format!("{}/token", config_dir);
+        fs::write(&config_file, token.trim())?;
+        println!("Successfully saved Bot Token to {}", config_file);
+        return Ok(());
+    }
+
     let args = parse_custom_args();
 
     if args.is_dl {
-        return handle_download(args.dl_url).await;
+        return handle_download(args.dl_arg, args.webhook).await;
     }
 
     if args.show_help {
@@ -393,6 +539,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    save_to_history(&filename, &buffer);
+
     upload_to_discord(&webhook_url, buffer, &filename, &title, force_file).await?;
 
     Ok(())
@@ -426,7 +574,7 @@ async fn upload_to_discord(
     if force_file || !is_short_text {
         let mime_type = match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
             "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
+            "jpg" | "jpeg" => "image/gif",
             "gif" => "image/gif",
             "webp" => "image/webp",
             "pdf" => "application/pdf",
