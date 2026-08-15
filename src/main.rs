@@ -8,35 +8,26 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// Stream/upload logs to Discord Webhooks cleanly with options for stdout/stderr filtering & Ctrl+C safety.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "Send command outputs to Discord Webhook")]
 struct Args {
-    /// Target Discord Webhook URL (env: DISCORD_WEBHOOK_URL)
+    /// Discord Webhook URL (env: DISCORD_WEBHOOK_URL)
     #[arg(short, long, env = "DISCORD_WEBHOOK_URL")]
     webhook: Option<String>,
 
-    /// Send an existing log file
+    /// Log file to upload
     #[arg(short, long)]
     file: Option<PathBuf>,
 
-    /// Title / Summary tag for the log
+    /// Send ONLY stderr
     #[arg(short, long)]
-    title: Option<String>,
+    stderr: bool,
 
-    /// Custom Bot name
-    #[arg(short, long, default_value = "Log Bot")]
-    username: String,
+    /// Send ONLY stdout
+    #[arg(short, long)]
+    stdout: bool,
 
-    /// Capture ONLY stderr (ignore stdout for Discord)
-    #[arg(long)]
-    err_only: bool,
-
-    /// Capture ONLY stdout (ignore stderr for Discord)
-    #[arg(long)]
-    out_only: bool,
-
-    /// Command to execute and capture (e.g. log colcon build)
+    /// Command to execute (e.g. log colcon build)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
 }
@@ -47,11 +38,10 @@ async fn main() -> Result<()> {
 
     let webhook_url = match args.webhook {
         Some(url) if !url.trim().is_empty() => url,
-        _ => bail!("Error: DISCORD_WEBHOOK_URL is not set.\nExport it in your shell or use --webhook <URL>."),
+        _ => bail!("Error: DISCORD_WEBHOOK_URL environment variable is not set."),
     };
 
-    let (buffer, filename, default_title) = if !args.command.is_empty() {
-        // Mode 1: Transparent Command Wrapper with Ctrl+C (SIGINT) Intercept
+    let (buffer, filename, title) = if !args.command.is_empty() {
         let interrupted = Arc::new(AtomicBool::new(false));
         let interrupted_clone = interrupted.clone();
 
@@ -69,12 +59,11 @@ async fn main() -> Result<()> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("Failed to spawn command '{cmd_name}'"))?;
+            .with_context(|| format!("Failed to run command '{cmd_name}'"))?;
 
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
 
-        // Stream output to terminal live while capturing
         let t_stdout = std::thread::spawn(move || {
             let mut out = io::stdout();
             let mut buf = [0u8; 1024];
@@ -107,11 +96,10 @@ async fn main() -> Result<()> {
         let status = child.wait()?;
         let is_ctrl_c = interrupted.load(Ordering::SeqCst);
 
-        // Filter what to capture based on flags
         let mut captured = Vec::new();
-        if args.err_only {
+        if args.stderr {
             captured = stderr_captured;
-        } else if args.out_only {
+        } else if args.stdout {
             captured = stdout_captured;
         } else {
             captured.extend_from_slice(&stdout_captured);
@@ -133,17 +121,15 @@ async fn main() -> Result<()> {
         } else {
             "[FAILED]"
         };
-        let title = format!("{} `{}`", status_str, args.command.join(" "));
+        let title_text = format!("{} `{}`", status_str, args.command.join(" "));
 
-        (captured, fname, title)
+        (captured, fname, title_text)
     } else if let Some(ref file_path) = args.file {
-        // Mode 2: Send log file
         let bytes = fs::read(file_path).with_context(|| format!("Failed to read '{:?}'", file_path))?;
         let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("log.log").to_string();
-        let title = format!("File: `{}`", fname);
-        (bytes, fname, title)
+        let title_text = format!("File: `{}`", fname);
+        (bytes, fname, title_text)
     } else if !io::stdin().is_terminal() {
-        // Mode 3: Stdin Pipe Wrapper
         let mut buffer = Vec::new();
         let mut stdin = io::stdin();
         let mut stdout = io::stdout();
@@ -158,18 +144,17 @@ async fn main() -> Result<()> {
 
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         let fname = format!("stream_{}.log", timestamp);
-        let title = "Piped Stream Log".to_string();
-        (buffer, fname, title)
+        let title_text = "Piped Stream Log".to_string();
+        (buffer, fname, title_text)
     } else {
-        bail!("No input provided.\n\nUsage Examples:\n  log colcon build\n  colcon build 2>&1 | log");
+        bail!("Usage:\n  log <command>\n  log -e <command>   # stderr only\n  log -o <command>   # stdout only");
     };
 
     if buffer.is_empty() {
         return Ok(());
     }
 
-    let final_title = args.title.unwrap_or(default_title);
-    upload_to_discord(&webhook_url, buffer, &filename, &final_title, &args.username).await?;
+    upload_to_discord(&webhook_url, buffer, &filename, &title).await?;
 
     Ok(())
 }
@@ -179,7 +164,6 @@ async fn upload_to_discord(
     content: Vec<u8>,
     filename: &str,
     title: &str,
-    username: &str,
 ) -> Result<()> {
     let client = reqwest::Client::new();
     let mut form = multipart::Form::new();
@@ -188,14 +172,9 @@ async fn upload_to_discord(
     if !title.is_empty() {
         payload.insert("content".to_string(), serde_json::Value::String(title.to_string()));
     }
-    if !username.is_empty() {
-        payload.insert("username".to_string(), serde_json::Value::String(username.to_string()));
-    }
 
-    if !payload.is_empty() {
-        let payload_json = serde_json::Value::Object(payload).to_string();
-        form = form.text("payload_json", payload_json);
-    }
+    let payload_json = serde_json::Value::Object(payload).to_string();
+    form = form.text("payload_json", payload_json);
 
     let part = multipart::Part::bytes(content)
         .file_name(filename.to_string())
