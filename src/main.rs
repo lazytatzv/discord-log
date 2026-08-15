@@ -20,19 +20,19 @@ struct Args {
     file: Option<PathBuf>,
 
     /// Send ONLY stderr
-    #[arg(short, long)]
+    #[arg(short = 'e', long = "stderr")]
     stderr: bool,
 
     /// Send ONLY stdout
-    #[arg(short, long)]
+    #[arg(short = 'o', long = "stdout")]
     stdout: bool,
 
     /// Filter output lines matching keyword (case-insensitive)
-    #[arg(short, long)]
+    #[arg(short = 'g', long = "grep")]
     grep: Option<String>,
 
     /// Command to execute (e.g. log colcon build)
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(trailing_var_arg = true)]
     command: Vec<String>,
 }
 
