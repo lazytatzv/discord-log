@@ -2,6 +2,10 @@
 name = "discord-log"
 version = "0.1.0"
 edition = "2024"
+description = "Send command execution outputs to a Discord Webhook cleanly and reliably."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lazytatzv/discord-log"
+readme = "README.md"
 
 [[bin]]
 name = "discord-log"
