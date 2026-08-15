@@ -16,6 +16,7 @@ Usage:
 Options:
   --init <URL>       Save Discord Webhook URL (one-time setup)
   --init-token <T>   Save Discord Bot Token (enables fetching history from Discord Channel)
+  -c, --comment <msg> Add a comment/message to the log output
   -e, --stderr       Send ONLY stderr output
   -o, --stdout       Send ONLY stdout output
   -g, --grep <word>  Filter output lines matching keyword (case-insensitive)
@@ -25,7 +26,7 @@ Options:
   -V, --version      Show version
 
 Examples:
-  log colcon build
+  log -c "Raspberry Pi Kernel Build" colcon build
   log dl             # Downloads the latest log
   log dl 1           # Downloads the 2nd latest log (1 step back)
   log dl 2           # Downloads the 3rd latest log (2 steps back)
@@ -34,6 +35,7 @@ Examples:
 struct Config {
     webhook: Option<String>,
     file: Option<PathBuf>,
+    comment: Option<String>,
     stderr: bool,
     stdout: bool,
     grep: Option<String>,
@@ -48,6 +50,7 @@ fn parse_custom_args() -> Config {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut webhook = None;
     let mut file = None;
+    let mut comment = None;
     let mut stderr = false;
     let mut stdout = false;
     let mut grep = None;
@@ -65,6 +68,7 @@ fn parse_custom_args() -> Config {
         return Config {
             webhook,
             file,
+            comment,
             stderr,
             stdout,
             grep,
@@ -91,6 +95,13 @@ fn parse_custom_args() -> Config {
         } else if arg == "-o" || arg == "--stdout" {
             stdout = true;
             idx += 1;
+        } else if arg == "-c" || arg == "--comment" || arg == "-m" || arg == "--message" {
+            if idx + 1 < raw.len() {
+                comment = Some(raw[idx + 1].clone());
+                idx += 2;
+            } else {
+                idx += 1;
+            }
         } else if arg == "-w" || arg == "--webhook" {
             if idx + 1 < raw.len() {
                 webhook = Some(raw[idx + 1].clone());
@@ -121,6 +132,7 @@ fn parse_custom_args() -> Config {
     Config {
         webhook,
         file,
+        comment,
         stderr,
         stdout,
         grep,
@@ -541,7 +553,7 @@ async fn main() -> Result<()> {
 
     save_to_history(&filename, &buffer);
 
-    upload_to_discord(&webhook_url, buffer, &filename, &title, force_file).await?;
+    upload_to_discord(&webhook_url, buffer, &filename, &title, args.comment.as_deref(), force_file).await?;
 
     Ok(())
 }
@@ -551,6 +563,7 @@ async fn upload_to_discord(
     content: Vec<u8>,
     filename: &str,
     title: &str,
+    comment: Option<&str>,
     force_file: bool,
 ) -> Result<()> {
     let client = reqwest::Client::new();
@@ -559,10 +572,16 @@ async fn upload_to_discord(
     let is_short_text = !force_file && content.len() <= 1500;
     let log_str = String::from_utf8_lossy(&content);
 
-    let payload_content = if is_short_text {
-        format!("{}\n```\n{}\n```", title, log_str.trim())
+    let comment_prefix = if let Some(c) = comment {
+        format!("💬 **{}**\n", c)
     } else {
-        title.to_string()
+        "".to_string()
+    };
+
+    let payload_content = if is_short_text {
+        format!("{}{}\n```\n{}\n```", comment_prefix, title, log_str.trim())
+    } else {
+        format!("{}{}", comment_prefix, title)
     };
 
     let mut payload = serde_json::Map::new();

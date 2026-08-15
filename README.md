@@ -25,6 +25,10 @@ log --init-token "YOUR_DISCORD_BOT_TOKEN"
 log colcon build
 log make -j4
 
+# Add a comment / message to the output
+log -c "Raspberry Pi Kernel Build" make -j4
+log -m "Unit Test Results" pytest
+
 # Download logs from Discord
 log dl       # Download latest log
 log dl 1     # Download 2nd latest log (1 step back)
