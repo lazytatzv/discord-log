@@ -18,14 +18,15 @@ Options:
   -e, --stderr       Send ONLY stderr output
   -o, --stdout       Send ONLY stdout output
   -g, --grep <word>  Filter output lines matching keyword (case-insensitive)
-  -f, --file <path>  Upload an existing log file
+  -f, --file <path>  Upload any file (.txt, .json, .png, .pdf, .log, etc.)
   -w, --webhook <URL> Override Discord Webhook URL
   -h, --help         Show this help message
   -V, --version      Show version
 
 Examples:
   log colcon build
-  log make -j4
+  log -f error.txt
+  log -f screenshot.png
   log -e -g error colcon build
 "#;
 
@@ -174,7 +175,7 @@ async fn main() -> Result<()> {
 
     let webhook_url = resolve_webhook_url(args.webhook)?;
 
-    let (buffer, filename, title) = if !args.command.is_empty() {
+    let (buffer, filename, title, is_binary_file) = if !args.command.is_empty() {
         let interrupted = Arc::new(AtomicBool::new(false));
         let interrupted_clone = interrupted.clone();
 
@@ -260,15 +261,22 @@ async fn main() -> Result<()> {
         };
         let title_text = format!("{} `{}`", status_str, args.command.join(" "));
 
-        (captured, fname, title_text)
+        (captured, fname, title_text, false)
     } else if let Some(ref file_path) = args.file {
         let mut bytes = fs::read(file_path).with_context(|| format!("Failed to read '{:?}'", file_path))?;
-        if let Some(ref pattern) = args.grep {
-            bytes = filter_by_grep(&bytes, pattern);
+        let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let is_image_or_binary = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "zip" | "tar" | "gz");
+
+        if !is_image_or_binary {
+            if let Some(ref pattern) = args.grep {
+                bytes = filter_by_grep(&bytes, pattern);
+            }
         }
-        let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("log.log").to_string();
+
         let title_text = format!("File: `{}`", fname);
-        (bytes, fname, title_text)
+        (bytes, fname, title_text, is_image_or_binary)
     } else if !io::stdin().is_terminal() {
         let mut buffer = Vec::new();
         let mut stdin = io::stdin();
@@ -289,7 +297,7 @@ async fn main() -> Result<()> {
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         let fname = format!("stream_{}.log", timestamp);
         let title_text = "Piped Stream Log".to_string();
-        (buffer, fname, title_text)
+        (buffer, fname, title_text, false)
     } else {
         print!("{}", HELP_TEXT);
         return Ok(());
@@ -299,7 +307,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    upload_to_discord(&webhook_url, buffer, &filename, &title).await?;
+    upload_to_discord(&webhook_url, buffer, &filename, &title, is_binary_file).await?;
 
     Ok(())
 }
@@ -309,11 +317,12 @@ async fn upload_to_discord(
     content: Vec<u8>,
     filename: &str,
     title: &str,
+    is_binary: bool,
 ) -> Result<()> {
     let client = reqwest::Client::new();
     let mut form = multipart::Form::new();
 
-    let is_short = content.len() <= 1500;
+    let is_short = !is_binary && content.len() <= 1500;
     let log_str = String::from_utf8_lossy(&content);
 
     let payload_content = if is_short {
@@ -329,9 +338,20 @@ async fn upload_to_discord(
     form = form.text("payload_json", payload_json);
 
     if !is_short {
+        let mime_type = match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "pdf" => "application/pdf",
+            "json" => "application/json",
+            "txt" => "text/plain; charset=utf-8",
+            _ => "application/octet-stream",
+        };
+
         let part = multipart::Part::bytes(content)
             .file_name(filename.to_string())
-            .mime_str("text/plain; charset=utf-8")?;
+            .mime_str(mime_type)?;
         form = form.part("files[0]", part);
     }
 
