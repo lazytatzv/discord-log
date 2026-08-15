@@ -1,6 +1,6 @@
 # discord-log (log)
 
-A CLI tool that wraps **any command** (`make`, `colcon build`, `pytest`, `cargo build`, etc.) or uploads log files directly to a Discord Webhook.
+Send command outputs or files directly to Discord.
 
 ## Installation
 
@@ -16,31 +16,19 @@ log --init "https://discord.com/api/webhooks/your/webhook/url"
 
 ## Usage
 
-### 1. Run ANY command & stream logs to Discord
-
 ```bash
+# Run any command & send output
 log colcon build
 log make -j4
-log cargo build --release
-log pytest
-```
 
-### 2. Upload an existing log file directly
+# Upload any file (.txt, .png, .pdf, etc.)
+log -f screenshot.png
+log -f build.log
 
-```bash
-log -f path/to/build.log
-```
-
-### 3. Filters & Options
-
-```bash
-# Filter lines matching keyword (case-insensitive):
+# Filter lines matching keyword
 log -g error colcon build
-log -f build.log -g error
 
-# Send stderr only:
+# Send stderr / stdout only
 log -e make
-
-# Send stdout only:
 log -o pytest
 ```
