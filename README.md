@@ -4,12 +4,12 @@ Send command execution outputs, build logs, and files directly to a Discord chan
 
 ## Features
 
-- 🚀 **Command Wrapper**: Attach `log` before any command (`log make`, `log cargo build`).
-- 💬 **Comment Support**: Attach custom messages/comments to your logs (`log -c "Raspberry Pi Build" make`).
-- 📥 **Log Download**: Download recent logs back to your terminal (`log dl`).
-- 📎 **File Attachment**: Upload files directly (`log -f screenshot.png`).
-- 🔍 **Grep Filtering**: Filter output lines by keyword before sending (`log -g error colcon build`).
-- ⚡ **Zero Setup Local History**: Automatically saves execution history locally as fallback.
+- **Command Wrapper**: Attach `log` before any command (`log make`, `log cargo build`).
+- **Comment Support**: Attach custom messages/comments to your logs (`log -c "Raspberry Pi Build" make`).
+- **Log Download**: Download recent logs back to your terminal (`log dl`).
+- **File Attachment**: Upload files directly (`log -f screenshot.png`).
+- **Grep Filtering**: Filter output lines by keyword before sending (`log -g error colcon build`).
+- **Zero Setup Local History**: Automatically saves execution history locally as fallback.
 
 ## Installation
 
