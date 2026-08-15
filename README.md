@@ -24,7 +24,9 @@ log colcon build
 log make -j4
 log cargo build --release
 log pytest
-log python script.py
+
+# Filter output lines by keyword (case-insensitive):
+log -g error colcon build
 
 # Send stderr only:
 log -e make
