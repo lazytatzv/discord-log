@@ -1,6 +1,12 @@
 # discord-log (log)
 
-Send command execution logs directly to Discord.
+Send command execution outputs to a Discord Webhook.
+
+## Installation
+
+```bash
+cargo install --git https://github.com/lazytatzv/discord-log.git
+```
 
 ## Quick Setup (Run once)
 
@@ -11,18 +17,12 @@ log --init "https://discord.com/api/webhooks/your/webhook/url"
 ## Usage
 
 ```bash
-# 1. Default (stdout + stderr)
+# Default (stdout + stderr)
 log colcon build
 
-# 2. stderr only
+# Send stderr only
 log -e colcon build
 
-# 3. stdout only
+# Send stdout only
 log -o colcon build
-```
-
-## Installation
-
-```bash
-cargo install --git https://github.com/lazytatzv/discord-log.git
 ```
