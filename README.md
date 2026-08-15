@@ -5,8 +5,9 @@ Send command execution outputs to a Discord Webhook.
 ## Installation
 
 ```bash
-cargo install --git https://github.com/lazytatzv/discord-log.git
+cargo install discord-log
 ```
+
 
 ## Quick Setup (Run once)
 
