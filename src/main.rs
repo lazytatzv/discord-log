@@ -32,7 +32,7 @@ struct Args {
     grep: Option<String>,
 
     /// Command to execute (e.g. log colcon build)
-    #[arg(trailing_var_arg = true)]
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
 
