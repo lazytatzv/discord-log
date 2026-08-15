@@ -32,14 +32,60 @@ struct Args {
     command: Vec<String>,
 }
 
+fn resolve_webhook_url(explicit: Option<String>) -> Result<String> {
+    // 1. Explicit CLI argument --webhook
+    if let Some(url) = explicit {
+        if !url.trim().is_empty() {
+            return Ok(url);
+        }
+    }
+
+    // 2. Environment variable DISCORD_WEBHOOK_URL
+    if let Ok(url) = std::env::var("DISCORD_WEBHOOK_URL") {
+        if !url.trim().is_empty() {
+            return Ok(url);
+        }
+    }
+
+    // 3. Global config file ~/.config/discord-log/webhook or ~/.discord-log-webhook
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let config_paths = [
+        format!("{}/.config/discord-log/webhook", home),
+        format!("{}/.discord-log-webhook", home),
+    ];
+
+    for path in &config_paths {
+        if let Ok(content) = fs::read_to_string(path) {
+            let trimmed = content.trim().to_string();
+            if !trimmed.is_empty() {
+                return Ok(trimmed);
+            }
+        }
+    }
+
+    bail!(
+        "Error: Discord Webhook URL is not set.\n\nQuick setup options:\n  1) Save config file:  log --init <WEBHOOK_URL>\n  2) Environment var: export DISCORD_WEBHOOK_URL=\"<WEBHOOK_URL>\"\n  3) Pass option:     log --webhook <WEBHOOK_URL> <command>"
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Quick intercept for --init setup
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() >= 3 && raw_args[1] == "--init" {
+        let url = &raw_args[2];
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let config_dir = format!("{}/.config/discord-log", home);
+        fs::create_dir_all(&config_dir)?;
+        let config_file = format!("{}/webhook", config_dir);
+        fs::write(&config_file, url.trim())?;
+        println!("Successfully saved Webhook URL to {}", config_file);
+        return Ok(());
+    }
+
     let args = Args::parse();
 
-    let webhook_url = match args.webhook {
-        Some(url) if !url.trim().is_empty() => url,
-        _ => bail!("Error: DISCORD_WEBHOOK_URL environment variable is not set."),
-    };
+    let webhook_url = resolve_webhook_url(args.webhook)?;
 
     let (buffer, filename, title) = if !args.command.is_empty() {
         let interrupted = Arc::new(AtomicBool::new(false));
@@ -147,7 +193,7 @@ async fn main() -> Result<()> {
         let title_text = "Piped Stream Log".to_string();
         (buffer, fname, title_text)
     } else {
-        bail!("Usage:\n  log <command>\n  log -e <command>   # stderr only\n  log -o <command>   # stdout only");
+        bail!("Usage:\n  log --init <WEBHOOK_URL>   # One-time setup\n  log <command>              # Run & log command");
     };
 
     if buffer.is_empty() {
