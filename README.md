@@ -33,4 +33,7 @@ log -e make
 
 # Send stdout only:
 log -o pytest
+
+# Combine flags (e.g. stderr only + grep error):
+log -e -g error colcon build
 ```
