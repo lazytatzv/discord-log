@@ -33,21 +33,18 @@ struct Args {
 }
 
 fn resolve_webhook_url(explicit: Option<String>) -> Result<String> {
-    // 1. Explicit CLI argument --webhook
     if let Some(url) = explicit {
         if !url.trim().is_empty() {
             return Ok(url);
         }
     }
 
-    // 2. Environment variable DISCORD_WEBHOOK_URL
     if let Ok(url) = std::env::var("DISCORD_WEBHOOK_URL") {
         if !url.trim().is_empty() {
             return Ok(url);
         }
     }
 
-    // 3. Global config file ~/.config/discord-log/webhook or ~/.discord-log-webhook
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let config_paths = [
         format!("{}/.config/discord-log/webhook", home),
@@ -63,14 +60,11 @@ fn resolve_webhook_url(explicit: Option<String>) -> Result<String> {
         }
     }
 
-    bail!(
-        "Error: Discord Webhook URL is not set.\n\nQuick setup options:\n  1) Save config file:  log --init <WEBHOOK_URL>\n  2) Environment var: export DISCORD_WEBHOOK_URL=\"<WEBHOOK_URL>\"\n  3) Pass option:     log --webhook <WEBHOOK_URL> <command>"
-    );
+    bail!("Error: Discord Webhook URL is not set.\nRun: log --init <WEBHOOK_URL>");
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Quick intercept for --init setup
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.len() >= 3 && raw_args[1] == "--init" {
         let url = &raw_args[2];
@@ -84,7 +78,6 @@ async fn main() -> Result<()> {
     }
 
     let args = Args::parse();
-
     let webhook_url = resolve_webhook_url(args.webhook)?;
 
     let (buffer, filename, title) = if !args.command.is_empty() {
@@ -193,7 +186,7 @@ async fn main() -> Result<()> {
         let title_text = "Piped Stream Log".to_string();
         (buffer, fname, title_text)
     } else {
-        bail!("Usage:\n  log --init <WEBHOOK_URL>   # One-time setup\n  log <command>              # Run & log command");
+        bail!("Usage:\n  log --init <WEBHOOK_URL>\n  log <command>");
     };
 
     if buffer.is_empty() {
@@ -214,19 +207,30 @@ async fn upload_to_discord(
     let client = reqwest::Client::new();
     let mut form = multipart::Form::new();
 
+    let is_short = content.len() <= 1500;
+    let log_str = String::from_utf8_lossy(&content);
+
+    let payload_content = if is_short {
+        // Short log: Embed directly in Discord text code block (No clutter file attachment)
+        format!("{}\n```\n{}\n```", title, log_str.trim())
+    } else {
+        // Long log: Include title and attach file
+        title.to_string()
+    };
+
     let mut payload = serde_json::Map::new();
-    if !title.is_empty() {
-        payload.insert("content".to_string(), serde_json::Value::String(title.to_string()));
-    }
+    payload.insert("content".to_string(), serde_json::Value::String(payload_content));
 
     let payload_json = serde_json::Value::Object(payload).to_string();
     form = form.text("payload_json", payload_json);
 
-    let part = multipart::Part::bytes(content)
-        .file_name(filename.to_string())
-        .mime_str("text/plain; charset=utf-8")?;
-
-    form = form.part("files[0]", part);
+    // Only attach file if log is long (>1500 chars)
+    if !is_short {
+        let part = multipart::Part::bytes(content)
+            .file_name(filename.to_string())
+            .mime_str("text/plain; charset=utf-8")?;
+        form = form.part("files[0]", part);
+    }
 
     let res = client.post(webhook_url).multipart(form).send().await?;
 
