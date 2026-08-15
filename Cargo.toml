@@ -1,6 +1,6 @@
 [package]
 name = "discord-log"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 description = "Send command execution outputs to a Discord Webhook cleanly and reliably."
 license = "MIT OR Apache-2.0"
