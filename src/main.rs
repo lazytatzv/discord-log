@@ -27,9 +27,23 @@ struct Args {
     #[arg(short, long)]
     stdout: bool,
 
+    /// Filter output lines matching keyword (case-insensitive)
+    #[arg(short, long)]
+    grep: Option<String>,
+
     /// Command to execute (e.g. log colcon build)
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
+}
+
+fn filter_by_grep(input: &[u8], pattern: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(input);
+    let pattern_lower = pattern.to_lowercase();
+    let filtered_lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.to_lowercase().contains(&pattern_lower))
+        .collect();
+    filtered_lines.join("\n").into_bytes()
 }
 
 fn resolve_webhook_url(explicit: Option<String>) -> Result<String> {
@@ -150,6 +164,10 @@ async fn main() -> Result<()> {
             }
         }
 
+        if let Some(ref pattern) = args.grep {
+            captured = filter_by_grep(&captured, pattern);
+        }
+
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         let fname = format!("{}_{}.log", cmd_name, timestamp);
 
@@ -164,7 +182,10 @@ async fn main() -> Result<()> {
 
         (captured, fname, title_text)
     } else if let Some(ref file_path) = args.file {
-        let bytes = fs::read(file_path).with_context(|| format!("Failed to read '{:?}'", file_path))?;
+        let mut bytes = fs::read(file_path).with_context(|| format!("Failed to read '{:?}'", file_path))?;
+        if let Some(ref pattern) = args.grep {
+            bytes = filter_by_grep(&bytes, pattern);
+        }
         let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("log.log").to_string();
         let title_text = format!("File: `{}`", fname);
         (bytes, fname, title_text)
@@ -179,6 +200,10 @@ async fn main() -> Result<()> {
             let _ = stdout.write_all(&chunk[..n]);
             let _ = stdout.flush();
             buffer.extend_from_slice(&chunk[..n]);
+        }
+
+        if let Some(ref pattern) = args.grep {
+            buffer = filter_by_grep(&buffer, pattern);
         }
 
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -211,10 +236,8 @@ async fn upload_to_discord(
     let log_str = String::from_utf8_lossy(&content);
 
     let payload_content = if is_short {
-        // Short log: Embed directly in Discord text code block (No clutter file attachment)
         format!("{}\n```\n{}\n```", title, log_str.trim())
     } else {
-        // Long log: Include title and attach file
         title.to_string()
     };
 
@@ -224,7 +247,6 @@ async fn upload_to_discord(
     let payload_json = serde_json::Value::Object(payload).to_string();
     form = form.text("payload_json", payload_json);
 
-    // Only attach file if log is long (>1500 chars)
     if !is_short {
         let part = multipart::Part::bytes(content)
             .file_name(filename.to_string())
