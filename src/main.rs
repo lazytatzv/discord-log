@@ -11,7 +11,7 @@ const HELP_TEXT: &str = r#"discord-log (log) - Send command execution outputs or
 
 Usage:
   log <command> [args...]
-  log dl [URL]       Download the latest log (or specified Discord attachment URL)
+  log dl [URL]       Download specified URL or automatically fetch from clipboard
 
 Options:
   --init <URL>       Save Discord Webhook URL (one-time setup)
@@ -25,9 +25,8 @@ Options:
 
 Examples:
   log colcon build
-  log dl
+  log dl             # Auto-detects URL from clipboard & downloads instantly!
   log dl "https://cdn.discordapp.com/attachments/..."
-  log -f screenshot.png
 "#;
 
 struct Config {
@@ -131,6 +130,31 @@ fn parse_custom_args() -> Config {
     }
 }
 
+fn get_clipboard_url() -> Option<String> {
+    // Try wl-paste (Wayland)
+    if let Ok(out) = Command::new("wl-paste").output() {
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.starts_with("http://") || text.starts_with("https://") {
+            return Some(text);
+        }
+    }
+    // Try xclip (X11)
+    if let Ok(out) = Command::new("xclip").args(["-selection", "clipboard", "-o"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.starts_with("http://") || text.starts_with("https://") {
+            return Some(text);
+        }
+    }
+    // Try xsel (X11)
+    if let Ok(out) = Command::new("xsel").args(["--clipboard", "--output"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.starts_with("http://") || text.starts_with("https://") {
+            return Some(text);
+        }
+    }
+    None
+}
+
 fn filter_by_grep(input: &[u8], pattern: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(input);
     let pattern_lower = pattern.to_lowercase();
@@ -172,30 +196,18 @@ fn resolve_webhook_url(explicit: Option<String>) -> Result<String> {
     bail!("Error: Discord Webhook URL is not set.\nRun: log --init <WEBHOOK_URL>");
 }
 
-async fn handle_download(url_opt: Option<String>, webhook_url_opt: Option<String>) -> Result<()> {
+async fn handle_download(url_opt: Option<String>) -> Result<()> {
     let client = reqwest::Client::new();
 
     let target_url = if let Some(url) = url_opt {
         url
+    } else if let Some(clip_url) = get_clipboard_url() {
+        println!("[log] Detected URL from clipboard: {}", clip_url);
+        clip_url
     } else {
-        // Fetch via Webhook GET endpoint
-        let webhook_url = resolve_webhook_url(webhook_url_opt)?;
-        let res = client.get(&webhook_url).send().await.context("Failed to query Webhook info")?;
-        if !res.status().is_success() {
-            bail!("Failed to fetch Webhook info from Discord (HTTP {})", res.status());
-        }
-        let webhook_json: serde_json::Value = res.json().await?;
-        
-        let channel_id = webhook_json["channel_id"]
-            .as_str()
-            .context("Could not extract channel_id from Webhook URL")?;
-
-        // Fallback or direct fetch attempt
-        eprintln!("[log] Fetching latest message for Channel ID: {}", channel_id);
-        bail!("Direct channel reading requires channel permission. Pass attachment URL directly:\n  log dl \"<DISCORD_ATTACHMENT_URL>\"");
+        bail!("No URL provided and clipboard does not contain a valid URL.\nUsage:\n  1) Copy link on Discord -> run: log dl\n  2) Pass URL directly: log dl <URL>");
     };
 
-    // Download specified URL
     let res = client.get(&target_url).send().await.context("Failed to download file")?;
     if !res.status().is_success() {
         bail!("Failed to download file from Discord (HTTP {})", res.status());
@@ -234,7 +246,7 @@ async fn main() -> Result<()> {
     let args = parse_custom_args();
 
     if args.is_dl {
-        return handle_download(args.dl_url, args.webhook).await;
+        return handle_download(args.dl_url).await;
     }
 
     if args.show_help {
