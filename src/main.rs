@@ -265,6 +265,108 @@ fn get_bot_token() -> Option<String> {
     None
 }
 
+enum HistorySource {
+    Url(String),
+    Text(String),
+}
+
+struct HistoryItem {
+    filename: String,
+    comment: Option<String>,
+    source: HistorySource,
+}
+
+fn parse_discord_message(msg: &serde_json::Value) -> Option<HistoryItem> {
+    let content = msg["content"].as_str().unwrap_or("");
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut comment_lines = Vec::new();
+    let mut title_line = None;
+    let mut in_code_block = false;
+    let mut code_lines = Vec::new();
+
+    for line in &lines {
+        if line.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+
+        if in_code_block {
+            code_lines.push(*line);
+            continue;
+        }
+
+        if line.starts_with("[SUCCESS]")
+            || line.starts_with("[FAILED]")
+            || line.starts_with("[INTERRUPTED]")
+            || line.starts_with("File:")
+            || line.starts_with("Piped Stream Log")
+        {
+            title_line = Some(*line);
+        } else if title_line.is_none() && !line.trim().is_empty() {
+            comment_lines.push(*line);
+        }
+    }
+
+    let code_block_content = if !code_lines.is_empty() {
+        Some(code_lines.join("\n"))
+    } else {
+        None
+    };
+
+    let comment = if !comment_lines.is_empty() {
+        Some(comment_lines.join("\n"))
+    } else {
+        None
+    };
+
+    // 1. Check for attachments first
+    if let Some(atts) = msg["attachments"].as_array() {
+        for a in atts {
+            if let (Some(url), Some(filename)) = (a["url"].as_str(), a["filename"].as_str()) {
+                return Some(HistoryItem {
+                    filename: filename.to_string(),
+                    comment,
+                    source: HistorySource::Url(url.to_string()),
+                });
+            }
+        }
+    }
+
+    // 2. Fallback to inline code block if no attachment was uploaded
+    if let Some(text) = code_block_content {
+        let filename = if let Some(title) = title_line {
+            let cmd = if let (Some(start), Some(end)) = (title.find('`'), title.rfind('`')) {
+                if start < end {
+                    title[start + 1..end].split_whitespace().next().unwrap_or("log")
+                } else {
+                    "log"
+                }
+            } else {
+                "log"
+            };
+            let ts = msg["timestamp"].as_str().unwrap_or("");
+            let clean_ts: String = ts.chars().filter(|c| c.is_ascii_digit()).collect();
+            let ts_short = if clean_ts.len() >= 14 {
+                &clean_ts[..14]
+            } else {
+                "inline"
+            };
+            format!("{}_{}.log", cmd, ts_short)
+        } else {
+            "inline.log".to_string()
+        };
+
+        return Some(HistoryItem {
+            filename,
+            comment,
+            source: HistorySource::Text(text),
+        });
+    }
+
+    None
+}
+
 async fn handle_download(dl_arg: Option<String>, webhook_url_opt: Option<String>) -> Result<()> {
     let client = reqwest::Client::new();
 
@@ -308,38 +410,41 @@ async fn handle_download(dl_arg: Option<String>, webhook_url_opt: Option<String>
                 if let Ok(resp) = msg_res {
                     if resp.status().is_success() {
                         let msgs: Vec<serde_json::Value> = resp.json().await?;
-                        let mut attachments = Vec::new();
-                        for m in msgs {
-                            let content_text = m["content"].as_str().unwrap_or("").to_string();
-                            if let Some(atts) = m["attachments"].as_array() {
-                                for a in atts {
-                                    if let (Some(url), Some(filename)) = (a["url"].as_str(), a["filename"].as_str()) {
-                                        attachments.push((filename.to_string(), url.to_string(), content_text.clone()));
-                                    }
-                                }
+                        let mut items = Vec::new();
+                        for m in &msgs {
+                            if let Some(item) = parse_discord_message(m) {
+                                items.push(item);
                             }
                         }
 
-                        if !attachments.is_empty() {
+                        if !items.is_empty() {
                             let idx = if let Some(ref arg) = dl_arg {
                                 arg.parse::<usize>().unwrap_or(0)
                             } else {
                                 0
                             };
 
-                            if idx >= attachments.len() {
-                                bail!("Index out of range. Found {} recent attachments on Discord channel.", attachments.len());
+                            if idx >= items.len() {
+                                bail!("Index out of range. Found {} recent logs on Discord channel.", items.len());
                             }
 
-                            let (fname, target_url, content_text) = &attachments[idx];
-                            let dl_bytes = client.get(target_url).send().await?.bytes().await?;
-                            fs::write(fname, dl_bytes)?;
-                            println!("[log] Downloaded '{}' from Discord Channel (step {})", fname, idx);
+                            let target_item = &items[idx];
+                            match &target_item.source {
+                                HistorySource::Url(target_url) => {
+                                    let dl_bytes = client.get(target_url).send().await?.bytes().await?;
+                                    fs::write(&target_item.filename, dl_bytes)?;
+                                }
+                                HistorySource::Text(text) => {
+                                    fs::write(&target_item.filename, text.as_bytes())?;
+                                }
+                            }
 
-                            if let Some(first_line) = content_text.lines().next() {
-                                let first_line = first_line.trim();
-                                if !first_line.is_empty() && !first_line.starts_with("[SUCCESS]") && !first_line.starts_with("[FAILED]") && !first_line.starts_with("[INTERRUPTED]") && !first_line.starts_with("File:") {
-                                    println!("[comment] {}", first_line);
+                            println!("[log] Downloaded '{}' from Discord Channel (step {})", target_item.filename, idx);
+
+                            if let Some(ref comment) = target_item.comment {
+                                let trimmed = comment.trim();
+                                if !trimmed.is_empty() {
+                                    println!("[comment] {}", trimmed);
                                 }
                             }
                             return Ok(());
@@ -594,7 +699,8 @@ async fn upload_to_discord(
     let client = reqwest::Client::new();
     let mut form = multipart::Form::new();
 
-    let is_short_text = !force_file && content.len() <= 1500;
+    let is_text = std::str::from_utf8(&content).is_ok();
+    let is_short_text = !force_file && is_text && content.len() <= 1500;
     let log_str = String::from_utf8_lossy(&content);
 
     let comment_prefix = if let Some(c) = comment {
@@ -615,23 +721,21 @@ async fn upload_to_discord(
     let payload_json = serde_json::Value::Object(payload).to_string();
     form = form.text("payload_json", payload_json);
 
-    if force_file || !is_short_text {
-        let mime_type = match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/gif",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "pdf" => "application/pdf",
-            "json" => "application/json",
-            "txt" | "log" => "text/plain; charset=utf-8",
-            _ => "application/octet-stream",
-        };
+    let mime_type = match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "txt" | "log" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    };
 
-        let part = multipart::Part::bytes(content)
-            .file_name(filename.to_string())
-            .mime_str(mime_type)?;
-        form = form.part("files[0]", part);
-    }
+    let part = multipart::Part::bytes(content)
+        .file_name(filename.to_string())
+        .mime_str(mime_type)?;
+    form = form.part("files[0]", part);
 
     let res = client.post(webhook_url).multipart(form).send().await?;
 
